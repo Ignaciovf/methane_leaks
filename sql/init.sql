@@ -1,0 +1,30 @@
+CREATE EXTENSION IF NOT EXISTS postgis;
+
+CREATE TABLE methane_leaks (
+    id SERIAL PRIMARY KEY,
+    id_plume VARCHAR(255) UNIQUE,
+    source_name VARCHAR(255),
+    satellite VARCHAR(255),
+    tile_date TIMESTAMP,
+    lat DECIMAL(10, 8),
+    lon DECIMAL(11, 8),
+    actionable VARCHAR(50),
+    notified BOOLEAN,
+    country VARCHAR(100),
+    sector VARCHAR(100),
+    detection_institution VARCHAR(255),
+    quantification_institution VARCHAR(255),
+    tile VARCHAR(255),
+    ch4_fluxrate DECIMAL(15, 2),
+    ch4_fluxrate_std DECIMAL(15, 2),
+    wind_u DECIMAL(10, 2),
+    wind_v DECIMAL(10, 2),
+    total_emission DECIMAL(15, 2),
+    total_emission_std DECIMAL(15, 2),
+    wind_speed DECIMAL(10, 2),
+    last_update TIMESTAMP,
+    insert_date TIMESTAMP,
+    feedback_operator VARCHAR(255),
+    feedback_government VARCHAR(255),
+    contacted_by_methane_leaks BOOLEAN DEFAULT FALSE
+);

@@ -1,0 +1,7 @@
+pandas
+psycopg2-binary
+gradio
+python-dotenv
+openai
+tldextract
+bs4

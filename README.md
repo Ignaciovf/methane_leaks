@@ -37,11 +37,11 @@ Yet many leaks go unnoticed or unaddressed for weeks—or even months. Our goal 
 ---
 
 ## 🛠️ Project Structure
-/data/             # Raw data sources, e.g. JSON from UNEP/NASA
-/agents/           # LLM-powered agents to find contact info, analyze responsibility
-/notifications/    # Email, webhook, or API-based messaging logic
-/aws/              # Terraform/CDK configs for cloud deployment
-/frontend/         # (Planned) dashboard to show live methane events
+- /data/             # Raw data sources, e.g. JSON from UNEP/NASA
+- /agents/           # LLM-powered agents to find contact info, analyze responsibility
+- /notifications/    # Email, webhook, or API-based messaging logic
+- /aws/              # Terraform/CDK configs for cloud deployment
+- /frontend/         # (Planned) dashboard to show live methane events
 
 ---
 
