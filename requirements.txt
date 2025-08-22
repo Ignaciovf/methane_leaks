@@ -5,3 +5,8 @@ python-dotenv
 openai
 tldextract
 bs4
+streamlit==1.36.0
+psycopg2-binary
+python-dotenv
+pandas
+streamlit-aggrid==0.3.4.post3
