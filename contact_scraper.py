@@ -13,6 +13,7 @@ import requests
 import pandas as pd
 import tldextract
 from bs4 import BeautifulSoup
+from openai import OpenAI
 
 # =============================================================================
 # Minimal logging (prints + UI log list)
@@ -56,6 +57,8 @@ HIGH_VALUE_PATHS = [
 # Optional Google CSE
 GOOGLE_KEY = os.getenv("GOOGLE_API_KEY", "").strip()
 GOOGLE_CX  = os.getenv("GOOGLE_CX", "").strip()
+
+OPENAI_SEARCH_MODEL = os.getenv("OPENAI_SEARCH_MODEL", "gpt-4o-mini").strip()
 
 # NOTE: Do NOT read SCRAPER_SITE_OVERRIDES here (import time). We read it dynamically in _load_overrides().
 
@@ -143,6 +146,31 @@ def _match_override(name: str, overrides: Dict[str, str]) -> str:
             return site
     return ""
 
+
+def _openai_web_search_first_result(query: str, logs: Optional[List[str]], timeout: int = 20) -> Optional[str]:
+    """Use OpenAI's web_search tool to locate the official website."""
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        _log(logs, "OPENAI_API_KEY not set — skipping OpenAI search.")
+        return None
+    try:
+        _log(logs, f"[OpenAI] query={query}")
+        client = OpenAI(api_key=api_key)
+        resp = client.responses.create(
+            model=OPENAI_SEARCH_MODEL or "gpt-4o-mini",
+            tools=[{"type": "web_search", "search_context_size": "low"}],
+            input=f"Find the official homepage for {query}. Return only the URL.",
+        )
+        text = (getattr(resp, "output_text", "") or "").strip()
+        match = re.search(r"https?://[^\s]+", text)
+        if match:
+            url = match.group(0).strip("'\".,)")
+            if not _is_social(url):
+                return url
+    except Exception as e:
+        _log(logs, f"[OpenAI] error: {e}")
+    return None
+
 def _google_cse_first_result(query: str, logs: Optional[List[str]], timeout: int = 10) -> Optional[str]:
     if not (GOOGLE_KEY and GOOGLE_CX):
         if GOOGLE_KEY and not GOOGLE_CX:
@@ -193,10 +221,12 @@ def _duckduckgo_first_result(query: str, logs: Optional[List[str]], timeout: int
     return None
 
 def _search_first_result(query: str, logs: Optional[List[str]], provider: str = "auto", timeout: int = 10) -> Optional[str]:
-    """Return first result from configured provider (Google or DuckDuckGo)."""
+    """Return first result from configured provider (OpenAI, Google or DuckDuckGo)."""
     provider = (provider or "auto").lower()
     # Determine search order
     searchers: List[Tuple[str, Callable[..., Optional[str]]]] = []
+    if provider in ("openai", "auto"):
+        searchers.append(("openai", lambda q: _openai_web_search_first_result(q, logs, timeout)))
     if provider in ("google", "auto"):
         searchers.append(("google", lambda q: _google_cse_first_result(q, logs, timeout)))
     if provider in ("duckduckgo", "auto"):
@@ -207,6 +237,8 @@ def _search_first_result(query: str, logs: Optional[List[str]], provider: str = 
         if url:
             if name == "google":
                 _log(logs, f"Resolved via Google CSE: {url}")
+            elif name == "openai":
+                _log(logs, f"Resolved via OpenAI web search: {url}")
             else:
                 _log(logs, f"Resolved via DuckDuckGo: {url}")
             return url
@@ -227,7 +259,7 @@ def resolve_website(
     """
     1) Use given website if present.
     2) Try manual overrides (site_overrides.json or env path).
-    3) Try search provider (Google CSE if configured, otherwise DuckDuckGo):
+    3) Try search provider (OpenAI web search, Google CSE or DuckDuckGo):
        "<name> <country>" then "<name>".
     4) Otherwise: return "" and let the UI show 'add mapping'.
     """

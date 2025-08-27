@@ -86,3 +86,24 @@ def test_resolve_website_uses_open_search(monkeypatch):
     )
     assert site == "https://operator.example"
 
+
+def test_resolve_website_uses_openai(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+
+    def fake_openai(query, logs, timeout=10):
+        return "https://operator.example"
+
+    monkeypatch.setattr(cs, "_openai_web_search_first_result", fake_openai)
+
+    logs = []
+    site = cs.resolve_website(
+        name="Five Sisters compressor station",
+        country="USA",
+        lat=None,
+        lon=None,
+        given_website="",
+        logs=logs,
+        search_provider="openai",
+    )
+    assert site == "https://operator.example"
+
