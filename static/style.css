@@ -33,6 +33,16 @@ h2 {
     transform: translate(-50%, -50%);
 }
 
+.hero .overlay h1 {
+    font-size: 4rem;
+    margin: 0;
+}
+
+.hero .overlay .tagline {
+    font-size: 1.5rem;
+    margin-top: 0.5rem;
+}
+
 .buttons {
     margin-top: 20px;
 }
@@ -54,10 +64,19 @@ h2 {
 
 .button.github {
     background: #333;
+    display: inline-flex;
+    align-items: center;
 }
 
 .button.github:hover {
     background: #000;
+}
+
+.button.github .icon {
+    width: 20px;
+    height: 20px;
+    margin-right: 8px;
+    fill: #fff;
 }
 
 /* Section layout */
@@ -122,6 +141,14 @@ footer a {
 
     .hero .overlay {
         width: 90%;
+    }
+
+    .hero .overlay h1 {
+        font-size: 2.5rem;
+    }
+
+    .hero .overlay .tagline {
+        font-size: 1.2rem;
     }
 }
 
