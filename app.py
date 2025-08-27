@@ -257,7 +257,6 @@ request_timeout = st.sidebar.slider("HTTP timeout (s)", 5, 30, 12)
 max_pages = st.sidebar.slider("Max pages per site", 1, 30, 10)
 retry_count = st.sidebar.slider("Retries per request", 0, 3, 1)
 enable_enrichment = st.sidebar.checkbox("Enrich missing websites (OSM + Search)", value=True)
-search_provider = st.sidebar.selectbox("Search provider (for enrichment)", ["auto", "bing", "google_cse", "duckduckgo"], index=0)
 
 # State
 for key, default in {
@@ -460,7 +459,6 @@ else:
                         max_pages=max_pages,
                         retries=retry_count,
                         enrich_missing_website=enable_enrichment,
-                        search_provider=search_provider,
                         progress_cb=lambda p: progress.progress(min(max(p, 0.0), 1.0)),
                         log_cb=lambda line: log_area.code(line, language="text")
                     )
