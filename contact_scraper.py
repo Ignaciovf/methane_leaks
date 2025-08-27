@@ -3,21 +3,20 @@ warnings.simplefilter(action="ignore", category=FutureWarning)
 
 import os
 import re
-import time
-import html
 import json
+import time
 import logging
-import tldextract
+from typing import List, Dict, Any, Tuple, Optional, Callable
+from urllib.parse import urljoin, urlparse
+
 import requests
 import pandas as pd
-
+import tldextract
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse, quote_plus
-from typing import List, Dict, Any, Tuple, Optional, Callable
 
-# -----------------------
-# Logging
-# -----------------------
+# =============================================================================
+# Minimal logging (prints + UI log list)
+# =============================================================================
 LOG_LEVEL = os.getenv("SCRAPER_LOG_LEVEL", "INFO").upper()
 logger = logging.getLogger("contact_scraper")
 if not logger.handlers:
@@ -26,24 +25,43 @@ if not logger.handlers:
     logger.addHandler(handler)
 logger.setLevel(LOG_LEVEL)
 
-UA = "methane-leaks/1.0 (contact-scraper)"
+def _log(logs: Optional[List[str]], msg: str):
+    print(msg, flush=True)
+    logger.info(msg)
+    if logs is not None:
+        logs.append(msg)
+
+# =============================================================================
+# Config & constants
+# =============================================================================
+UA = "methane-leaks/2.0 (contact-scraper)"
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": UA, "Accept": "text/html,application/xhtml+xml"})
 
-EMAIL_RE = re.compile(r'[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}', re.I)
-PHONE_RE = re.compile(r'(\+?\d[\d\s().-]{6,}\d)')
+EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
+PHONE_RE = re.compile(r"(\+?\d[\d\s().-]{6,}\d)")
 
-SOCIAL_DOMAINS = ("facebook.com", "linkedin.com", "instagram.com", "twitter.com", "x.com", "tiktok.com", "youtube.com")
-CANDIDATE_PATHS = [
-    "/", "/contact", "/contact-us", "/about", "/about-us", "/imprint", "/legal",
-    "/empresa", "/contacto", "/quienes-somos", "/impressum", "/kontakt"
+SOCIAL_DOMAINS = ("facebook.com", "linkedin.com", "instagram.com", "twitter.com", "x.com",
+                  "tiktok.com", "youtube.com")
+
+HIGH_VALUE_PATHS = [
+    "/", "/contact", "/contact-us", "/about", "/about-us",
+    "/investors", "/investor-relations", "/ir",
+    "/press", "/media", "/newsroom",
+    "/sustainability", "/esg", "/csr",
+    "/privacy", "/privacy-policy", "/terms", "/terms-of-use", "/legal",
+    "/impressum", "/imprint", "/empresa", "/contacto", "/quienes-somos", "/kontakt",
 ]
 
+# Optional Google CSE
+GOOGLE_KEY = os.getenv("GOOGLE_API_KEY", "").strip()
+GOOGLE_CX  = os.getenv("GOOGLE_CX", "").strip()
 
-def _norm_url(url: str) -> str:
-    return (url or "").split("#")[0].strip()
+# NOTE: Do NOT read SCRAPER_SITE_OVERRIDES here (import time). We read it dynamically in _load_overrides().
 
-
+# =============================================================================
+# Small helpers
+# =============================================================================
 def _ensure_scheme(url: str) -> str:
     if not url:
         return url
@@ -51,6 +69,11 @@ def _ensure_scheme(url: str) -> str:
         return "https://" + url
     return url
 
+def _is_social(url: str) -> bool:
+    if not url:
+        return False
+    host = urlparse(url).netloc.lower()
+    return any(s in host for s in SOCIAL_DOMAINS)
 
 def _domain_from_url(url: str) -> str:
     parts = tldextract.extract(url or "")
@@ -58,288 +81,240 @@ def _domain_from_url(url: str) -> str:
         return ""
     return ".".join([p for p in [parts.domain, parts.suffix] if p])
 
-
-def _is_social(url: str) -> bool:
-    if not url:
-        return False
-    host = urlparse(url).netloc.lower()
-    return any(s in host for s in SOCIAL_DOMAINS)
-
-
-def _get(url: str, timeout: int = 12, retries: int = 1, logs: List[str] = None) -> Optional[requests.Response]:
-    url = _ensure_scheme(url)
-    for attempt in range(retries + 1):
-        try:
-            if logs is not None:
-                logs.append(f"GET {url} (attempt {attempt+1})")
-            resp = SESSION.get(url, timeout=timeout, allow_redirects=True)
-            if 200 <= resp.status_code < 300:
-                return resp
-            if logs is not None:
-                logs.append(f"Non-2xx: {resp.status_code} for {url}")
-        except requests.RequestException as e:
-            if logs is not None:
-                logs.append(f"Request error on {url}: {e}")
-        time.sleep(0.35 * (attempt + 1))
-    return None
-
-
 def _collect_contacts_from_html(html_text: str) -> Tuple[List[str], List[str]]:
-    emails = set(EMAIL_RE.findall(html_text or ""))
-    phones = set(PHONE_RE.findall(html_text or ""))
-    emails = {e.strip().strip(".,;") for e in emails}
-    phones = {p.strip() for p in phones}
+    emails = {e.strip().strip(".,;").lower() for e in EMAIL_RE.findall(html_text or "")}
+    phones = {p.strip() for p in PHONE_RE.findall(html_text or "")}
     return sorted(emails), sorted(phones)
 
-
-def _first_contactish_link(soup: BeautifulSoup, base_url: str) -> Optional[str]:
-    for a in soup.select("a[href]"):
-        href = a.get("href")
-        if not href:
-            continue
-        lower = href.lower()
-        if any(k in lower for k in ["contact", "kontakt", "impressum", "imprint", "legal", "empresa", "contacto"]):
-            return urljoin(base_url, href)
-    return None
-
-
 def _best_email(emails: List[str], domain: str) -> str:
+    """Pick a sensible email: same-domain preferred, otherwise role-ish, else first."""
     if not emails:
         return ""
     if domain:
-        domain_emails = [e for e in emails if e.lower().endswith("@" + domain) or domain in e.lower()]
-        if domain_emails:
-            return domain_emails[0]
+        domain_hits = [e for e in emails if domain in e]
+        if domain_hits:
+            for e in domain_hits:
+                if "noreply" not in e and "no-reply" not in e:
+                    return e
+            return domain_hits[0]
+    role_order = ["environment", "env@", "compliance", "operations", "ops@", "sustainability",
+                  "esg", "media", "press", "investor", "ir@"]
+    for role in role_order:
+        for e in emails:
+            if role in e:
+                return e
     return emails[0]
 
+# =============================================================================
+# Overrides & a single optional search provider
+# =============================================================================
+def _load_overrides(logs: Optional[List[str]]) -> Dict[str, str]:
+    """
+    Load manual name→site mappings from site_overrides.json.
+    Priority:
+      1) SCRAPER_SITE_OVERRIDES env var (evaluated at call time so tests/monkeypatch work)
+      2) ./site_overrides.json in current working directory
+    """
+    # Read env dynamically on every call (fixes pytest monkeypatch + hot reload)
+    env_path = os.getenv("SCRAPER_SITE_OVERRIDES", "").strip()
+    path = env_path if env_path else ""
 
-def _sanitize_candidate_website(website: str) -> str:
-    if not website:
-        return ""
-    website = _ensure_scheme(website.strip())
-    if _is_social(website):
-        return ""
-    return website
+    if not path:
+        cwd_path = os.path.join(os.getcwd(), "site_overrides.json")
+        path = cwd_path if os.path.exists(cwd_path) else ""
 
+    if path and os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            _log(logs, f"Overrides loaded from {path} ({len(data)} entries).")
+            return {k.lower(): v for k, v in data.items() if isinstance(k, str) and isinstance(v, str)}
+        except Exception as e:
+            _log(logs, f"Could not load overrides from {path}: {e}")
+            return {}
+    else:
+        _log(logs, "No overrides file found (optional).")
+        return {}
 
-# -----------------------
-# Enrichment: OSM + DuckDuckGo
-# -----------------------
-def _nominatim_search(name: str, logs: List[str], timeout: int = 10) -> Optional[dict]:
+def _match_override(name: str, overrides: Dict[str, str]) -> str:
+    nm = (name or "").lower()
+    for key, site in overrides.items():
+        if key and key in nm:
+            return site
+    return ""
+
+def _google_cse_first_result(query: str, logs: Optional[List[str]], timeout: int = 10) -> Optional[str]:
+    if not (GOOGLE_KEY and GOOGLE_CX):
+        if GOOGLE_KEY and not GOOGLE_CX:
+            _log(logs, "Google API key present but GOOGLE_CX missing — skipping Google CSE.")
+        elif GOOGLE_CX and not GOOGLE_KEY:
+            _log(logs, "GOOGLE_CX present but GOOGLE_API_KEY missing — skipping Google CSE.")
+        else:
+            _log(logs, "Google CSE keys not configured — skipping search.")
+        return None
     try:
-        params = {"q": name, "format": "json", "addressdetails": 1, "limit": 5, "extratags": 1}
-        headers = {"User-Agent": UA}
-        url = "https://nominatim.openstreetmap.org/search"
-        logs.append(f"OSM search: {url}?q={quote_plus(name)}")
-        r = requests.get(url, params=params, headers=headers, timeout=timeout)
+        _log(logs, f"[Google CSE] query={query}")
+        r = SESSION.get(
+            "https://www.googleapis.com/customsearch/v1",
+            params={"key": GOOGLE_KEY, "cx": GOOGLE_CX, "q": query, "num": 5},
+            timeout=timeout
+        )
         if r.status_code != 200:
-            logs.append(f"OSM search non-200: {r.status_code}")
+            _log(logs, f"[Google CSE] non-200: {r.status_code}")
             return None
-        arr = r.json()
-        return arr[0] if arr else None
+        items = (r.json().get("items") or [])
+        for it in items:
+            url = it.get("link")
+            if url and not _is_social(url):
+                return url
     except Exception as e:
-        logs.append(f"OSM search error: {e}")
-        return None
+        _log(logs, f"[Google CSE] error: {e}")
+    return None
 
-
-def _nominatim_reverse(lat: float, lon: float, logs: List[str], timeout: int = 10) -> Optional[dict]:
-    try:
-        params = {"lat": f"{lat}", "lon": f"{lon}", "format": "json", "zoom": 16, "addressdetails": 1, "extratags": 1}
-        headers = {"User-Agent": UA}
-        url = "https://nominatim.openstreetmap.org/reverse"
-        logs.append(f"OSM reverse: {url}?lat={lat}&lon={lon}")
-        r = requests.get(url, params=params, headers=headers, timeout=timeout)
-        if r.status_code != 200:
-            logs.append(f"OSM reverse non-200: {r.status_code}")
-            return None
-        return r.json()
-    except Exception as e:
-        logs.append(f"OSM reverse error: {e}")
-        return None
-
-
-def _extract_osm_contacts(feature: dict) -> Dict[str, str]:
-    out = {"website": "", "email": "", "phone": ""}
-    if not feature:
-        return out
-    extratags = feature.get("extratags") or {}
-    out["website"] = extratags.get("website", "") or extratags.get("contact:website", "")
-    out["email"] = extratags.get("email", "") or extratags.get("contact:email", "")
-    out["phone"] = extratags.get("phone", "") or extratags.get("contact:phone", "")
-    return out
-
-
-def _duckduckgo_first_result(query: str, logs: List[str], timeout: int = 10) -> Optional[str]:
+# =============================================================================
+# Website resolution (simple & deterministic)
+# =============================================================================
+def resolve_website(
+    name: str,
+    country: str,
+    lat: Optional[float],
+    lon: Optional[float],
+    given_website: str,
+    logs: Optional[List[str]]
+) -> str:
     """
-    Very light HTML result scraper for first result. We avoid social sites.
-    Includes polite sleep to reduce 202s.
+    1) Use given website if present.
+    2) Try manual overrides (site_overrides.json or env path).
+    3) Try Google CSE (if configured): "<name> <country>" then "<name>".
+    4) Otherwise: return "" and let the UI show 'add mapping'.
     """
-    try:
-        time.sleep(1.2)  # be polite to reduce DDG 202s
-        url = "https://duckduckgo.com/html/"
-        params = {"q": query}
-        logs.append(f"DDG search: {url}?q={quote_plus(query)}")
-        r = SESSION.get(url, params=params, timeout=timeout)
-        if r.status_code != 200:
-            logs.append(f"DDG non-200: {r.status_code}")
-            return None
-        soup = BeautifulSoup(r.text, "html.parser")
-        for a in soup.select("a.result__a"):
-            href = a.get("href")
-            if not href:
-                continue
-            full = _ensure_scheme(href)
-            if not _is_social(full):
-                return full
-        return None
-    except Exception as e:
-        logs.append(f"DDG error: {e}")
-        return None
+    site = (given_website or "").strip()
+    if site:
+        _log(logs, f"Website provided by candidate: {site}")
+        return _ensure_scheme(site)
 
+    ov = _load_overrides(logs)
+    matched = _match_override(name, ov)
+    if matched:
+        _log(logs, f"Override matched: {matched}")
+        return _ensure_scheme(matched)
 
-def enrich_candidate_website(name: str, lat: Optional[float], lon: Optional[float], logs: List[str], country: str = "") -> Dict[str, str]:
-    """
-    Attempts to discover a website/email/phone for a company with the given name/coords.
-    Strategy:
-      1) OSM reverse by coordinates.
-      2) OSM search by name (as-is and country-augmented).
-      3) DuckDuckGo query "<name> <country> sitio web" then "<name>".
-    """
-    result = {"website": "", "email": "", "phone": ""}
+    q1 = f"{name} {country}".strip()
+    site = _google_cse_first_result(q1, logs) or _google_cse_first_result(name, logs)
+    if site:
+        _log(logs, f"Resolved via Google CSE: {site}")
+        return _ensure_scheme(site)
 
-    # 1) Reverse by coords
-    if lat is not None and lon is not None:
-        rev = _nominatim_reverse(lat, lon, logs)
-        c = _extract_osm_contacts(rev or {})
-        if c["website"] or c["email"] or c["phone"]:
-            return c
+    _log(logs, "No website resolved (consider adding to site_overrides.json).")
+    return ""
 
-    # 2) Name search (as-is + country)
-    if name and name.strip() and name.lower() != "(unnamed)":
-        feat = _nominatim_search(name, logs)
-        c = _extract_osm_contacts(feat or {})
-        if c["website"] or c["email"] or c["phone"]:
-            return c
+# =============================================================================
+# Crawl contacts from a site (small, robust)
+# =============================================================================
+def _http_get(url: str, timeout: int, retries: int, logs: Optional[List[str]]) -> Optional[str]:
+    url = _ensure_scheme(url)
+    for attempt in range(retries + 1):
+        try:
+            _log(logs, f"GET {url} (attempt {attempt+1})")
+            r = SESSION.get(url, timeout=timeout, allow_redirects=True)
+            if 200 <= r.status_code < 300 and (r.text or "").strip():
+                return r.text
+            _log(logs, f"Non-2xx: {r.status_code} for {url}")
+        except requests.RequestException as e:
+            _log(logs, f"Request error on {url}: {e}")
+        time.sleep(0.25 * (attempt + 1))
+    return None
 
-        if country:
-            feat2 = _nominatim_search(f"{name} {country}", logs)
-            c2 = _extract_osm_contacts(feat2 or {})
-            if c2["website"] or c2["email"] or c2["phone"]:
-                return c2
+def crawl_for_contacts(
+    base_site: str,
+    timeout: int,
+    max_pages: int,
+    retries: int,
+    logs: Optional[List[str]]
+) -> Tuple[List[str], List[str], List[str]]:
+    visited: List[str] = []
+    emails_all, phones_all = set(), set()
+    seen = set()
+    queue = [urljoin(base_site, p) for p in HIGH_VALUE_PATHS]
 
-    # 3) DuckDuckGo first result
-    if name:
-        q1 = f"{name} {country} sitio web" if country else f"{name} sitio web"
-        url = _duckduckgo_first_result(q1, logs) or _duckduckgo_first_result(name, logs)
-        if url and not _is_social(url):
-            result["website"] = url
+    while queue and len(visited) < max_pages:
+        url = queue.pop(0)
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        html = _http_get(url, timeout=timeout, retries=retries, logs=logs)
+        if not html:
+            continue
+        visited.append(url)
+        ems, phs = _collect_contacts_from_html(html)
+        emails_all.update(ems)
+        phones_all.update(phs)
 
-    return result
+        soup = BeautifulSoup(html, "html.parser")
+        for a in soup.select("a[href]"):
+            href = a.get("href") or ""
+            lower = href.lower()
+            if any(k in lower for k in ["contact", "kontakt", "impressum", "imprint", "legal", "privacy", "terms",
+                                        "investor", "media", "press", "contacto", "empresa"]):
+                nxt = urljoin(url, href)
+                if nxt not in seen and len(visited) + len(queue) < max_pages:
+                    queue.append(nxt)
+                    break
 
+    return sorted(emails_all), sorted(phones_all), visited
 
-# -----------------------
-# Core scraping
-# -----------------------
+# =============================================================================
+# Public API (same signatures as before)
+# =============================================================================
 def scrape_contacts_for_candidate(
     cand: Dict[str, Any],
     timeout: int = 12,
     max_pages: int = 8,
     retries: int = 1,
-    logs: List[str] = None,
-    enrich_missing_website: bool = True
+    logs: Optional[List[str]] = None,
+    enrich_missing_website: bool = True,
+    search_provider: str = "auto",  # ignored in simplified POC
 ) -> Dict[str, Any]:
-    """
-    Scrape a single candidate. Returns a row of normalized fields + diagnostics.
-    Optionally tries to enrich candidate website if missing (OSM + DDG).
-    """
     name = cand.get("name") or "(unnamed)"
+    country = cand.get("country") or ""
     lat = cand.get("lat")
     lon = cand.get("lon")
-    dist = cand.get("distance_km")
-    country_hint = cand.get("country") or ""
+    given_site = cand.get("website") or ""
 
-    base_site = _sanitize_candidate_website(cand.get("website") or "")
+    _log(logs, f"=== Candidate: {name}")
+
+    site = resolve_website(name, country, lat, lon, given_site, logs) if enrich_missing_website else (given_site or "")
+    site = _ensure_scheme(site)
 
     row = {
         "Candidate": name,
-        "Website": base_site,
+        "Website": site,
         "Best Email": "",
         "Best Phone": "",
         "All Emails": "",
         "All Phones": "",
         "Pages Checked": "",
-        "Lat": lat,
-        "Lon": lon,
-        "Distance_km": dist,
+        "Lat": cand.get("lat"),
+        "Lon": cand.get("lon"),
+        "Distance_km": cand.get("distance_km"),
         "Source": cand.get("source"),
         "Error": "",
     }
 
-    if logs is not None:
-        logs.append(f"=== Candidate: {name} | site: {base_site or '(none)'}")
-
-    # Enrich website if missing
-    if not base_site and enrich_missing_website:
-        if logs is not None:
-            logs.append("No website provided; trying enrichment (OSM + DuckDuckGo)…")
-        found = enrich_candidate_website(name, lat, lon, logs, country=country_hint)
-        base_site = _sanitize_candidate_website(found.get("website", ""))
-        # If OSM gave email/phone directly, capture now
-        if not row["Best Email"] and found.get("email"):
-            row["Best Email"] = found["email"]
-        if not row["Best Phone"] and found.get("phone"):
-            row["Best Phone"] = found["phone"]
-        row["Website"] = base_site or row["Website"]
-
-    if not base_site:
-        if logs is not None:
-            logs.append("No website resolved; skipping page crawl.")
+    if not site:
+        _log(logs, "No website — POC suggests adding to site_overrides.json.")
         return row
 
-    visited = []
-    emails_all, phones_all = set(), set()
-    domain = _domain_from_url(base_site)
-    queue = [urljoin(base_site, p) for p in CANDIDATE_PATHS]
-    seen = set()
+    domain = _domain_from_url(site)
+    emails, phones, pages = crawl_for_contacts(site, timeout=timeout, max_pages=max_pages, retries=retries, logs=logs)
 
-    while queue and len(visited) < max_pages:
-        url = _norm_url(queue.pop(0))
-        if not url or url in seen:
-            continue
-        seen.add(url)
+    row["All Emails"] = ", ".join(emails)
+    row["All Phones"] = ", ".join(phones)
+    row["Pages Checked"] = ", ".join(pages)
+    row["Best Email"] = _best_email(emails, domain) if emails else ""
+    row["Best Phone"] = phones[0] if phones else ""
 
-        resp = _get(url, timeout=timeout, retries=retries, logs=logs)
-        if not resp:
-            if logs is not None:
-                logs.append(f"Failed to fetch {url}")
-            continue
-
-        text = resp.text or ""
-        visited.append(url)
-
-        soup = BeautifulSoup(text, "html.parser")
-        emails, phones = _collect_contacts_from_html(text)
-        emails_all.update(emails)
-        phones_all.update(phones)
-
-        # discover contact page
-        contactish = _first_contactish_link(soup, url)
-        if contactish and contactish not in seen and len(visited) + len(queue) < max_pages:
-            queue.append(contactish)
-
-    row["All Emails"] = ", ".join(sorted(emails_all))
-    row["All Phones"] = ", ".join(sorted(phones_all))
-    row["Pages Checked"] = ", ".join(visited)
-    # Prefer domain-matching email
-    best_email = _best_email(sorted(emails_all), domain)
-    if best_email:
-        row["Best Email"] = best_email
-    if not row["Best Phone"]:
-        row["Best Phone"] = (sorted(phones_all)[0] if phones_all else "")
-
-    if logs is not None:
-        logs.append(f"Collected {len(emails_all)} emails, {len(phones_all)} phones for {name}")
-
+    _log(logs, f"Collected {len(emails)} emails, {len(phones)} phones.")
     return row
 
 
@@ -350,80 +325,66 @@ def scrape_contacts_bulk(
     max_pages: int = 8,
     retries: int = 1,
     enrich_missing_website: bool = True,
+    search_provider: str = "auto",  # kept for compatibility; not used
     progress_cb: Optional[Callable[[float], None]] = None,
     log_cb: Optional[Callable[[str], None]] = None,
 ) -> Tuple[pd.DataFrame, List[str]]:
-    """
-    Scrape a list of candidates. Returns (DataFrame, logs)
-    - debug: set logger to DEBUG (also adds a header line in logs)
-    - enrich_missing_website: try OSM + DuckDuckGo when no website is given
-    - progress_cb: optional callback [0..1] to report progress to UI
-    - log_cb: optional callback to stream the latest log lines to the UI
-    """
     logs: List[str] = []
     if debug:
         logger.setLevel(logging.DEBUG)
-        logs.append("Debug logging enabled.")
+        _log(logs, "Debug logging enabled.")
 
     if not isinstance(cands, list) or not cands:
-        logs.append("No candidates passed to scraper.")
+        _log(logs, "No candidates passed to scraper.")
         df = pd.DataFrame([{
             "Candidate": "(none)", "Website": "", "Best Email": "",
             "Best Phone": "", "All Emails": "", "All Phones": "",
             "Pages Checked": "", "Lat": "", "Lon": "", "Distance_km": "", "Source": "", "Error": "No candidates"
         }])
-        if progress_cb:
-            progress_cb(1.0)
-        if log_cb:
-            log_cb("\n".join(logs[-50:]))
+        if progress_cb: progress_cb(1.0)
+        if log_cb: log_cb("\n".join(logs[-50:]))
         return df, logs
 
     rows = []
     total = len(cands)
-    for idx, c in enumerate(cands):
+    for i, c in enumerate(cands):
         try:
-            msg = f"[{idx+1}/{total}] Starting candidate: {c.get('name') or '(unnamed)'}"
-            logs.append(msg)
-            if log_cb:
-                log_cb("\n".join(logs[-50:]))
+            _log(logs, f"[{i+1}/{total}] Starting candidate: {c.get('name') or '(unnamed)'}")
+            if log_cb: log_cb("\n".join(logs[-80:]))
 
             row = scrape_contacts_for_candidate(
                 c, timeout=timeout, max_pages=max_pages, retries=retries,
-                logs=logs, enrich_missing_website=enrich_missing_website
+                logs=logs, enrich_missing_website=enrich_missing_website,
+                search_provider=search_provider
             )
             rows.append(row)
         except Exception as e:
-            err = str(e)
-            logs.append(f"ERROR in candidate {c.get('name') or '(unnamed)'}: {err}")
+            _log(logs, f"ERROR in candidate: {e}")
             rows.append({
                 "Candidate": c.get("name") or "(unnamed)", "Website": c.get("website") or "",
                 "Best Email": "", "Best Phone": "", "All Emails": "", "All Phones": "",
                 "Pages Checked": "", "Lat": c.get("lat"), "Lon": c.get("lon"),
                 "Distance_km": c.get("distance_km"), "Source": c.get("source"),
-                "Error": err
+                "Error": str(e)
             })
 
-        # polite delay
-        time.sleep(0.25)
         if progress_cb:
-            progress_cb((idx + 1) / total)
+            progress_cb((i + 1) / total)
         if log_cb:
-            log_cb("\n".join(logs[-50:]))
+            log_cb("\n".join(logs[-80:]))
 
     df = pd.DataFrame(rows)
-
-    # Sort: 1) has email 2) distance
     df["__has_email__"] = df["Best Email"].apply(lambda x: 0 if (isinstance(x, str) and "@" in x) else 1)
-    sort_cols = ["__has_email__", "Distance_km", "Candidate"]
-    sort_cols = [c for c in sort_cols if c in df.columns]
-    df = df.sort_values(sort_cols, na_position="last").drop(columns=["__has_email__"], errors="ignore").reset_index(index=True, drop=True)
-    logs.append(f"Scraping complete. {len(df)} rows.")
+    sort_cols = [c for c in ["__has_email__", "Distance_km", "Candidate"] if c in df.columns]
+    df = df.sort_values(sort_cols, na_position="last").drop(columns=["__has_email__"], errors="ignore").reset_index(drop=True)
+
+    _log(logs, f"Scraping complete. {len(df)} rows.")
     if log_cb:
-        log_cb("\n".join(logs[-50:]))
+        log_cb("\n".join(logs[-80:]))
+
     return df, logs
 
 
-# Optional: backwards-compatible adapter
 def scrape_contacts_bulk_compat(cands: List[Dict[str, Any]]):
     df, _ = scrape_contacts_bulk(cands, debug=False)
     return df
