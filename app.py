@@ -354,12 +354,42 @@ else:
                     "radius": max(flux, 0) * 100,
                 }
             ])
+            # Build a color column based on CH4 magnitude (replace 'flux' with your CH4 field if different)
+            ch4_col = "flux"  # e.g., "flux", "ch4", "ch4_ppm", etc.
+
+            if not map_df.empty:
+                if ch4_col in map_df:
+                    min_v = float(map_df[ch4_col].min())
+                    max_v = float(map_df[ch4_col].max())
+                    rng = max(max_v - min_v, 1e-9)  # avoid division by zero
+
+                    def lerp(a, b, t):
+                        return int(a + (b - a) * t)
+
+                    colors = []
+                    for v in map_df[ch4_col]:
+                        t = (float(v) - min_v) / rng  # normalize 0..1
+                        # Blue (low) -> Orange/Red (high), with constant alpha
+                        r = lerp(0, 255, t)
+                        g = lerp(160, 64, t)
+                        b = lerp(255, 0, t)
+                        colors.append([r, g, b, 180])
+                    map_df["color"] = colors
+                else:
+                    # Fallback color if CH4 column missing
+                    map_df["color"] = [[0, 160, 255, 180]] * len(map_df)
+
+            # Render circle with constant pixel size; color scales with CH4
             layer = pdk.Layer(
                 "ScatterplotLayer",
                 data=map_df,
-                get_position="[lon, lat]",
-                get_radius="radius",
-                get_fill_color="[255, 0, 0, 160]",
+                get_position='[lon, lat]',
+                get_fill_color='color',
+                # Force a fixed on-screen circle size by clamping pixel radius
+                get_radius=1,
+                radius_scale=1,
+                radius_min_pixels=8,   # change this number to adjust the on-screen size
+                radius_max_pixels=8,   # same as min to keep it constant
                 pickable=True,
             )
             view_state = pdk.ViewState(
