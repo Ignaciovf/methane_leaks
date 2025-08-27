@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 
 import streamlit as st
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode
+import pydeck as pdk
 
 # ---- Project modules ----
 from mapbox_facility_finder import MapboxFacilityFinder
@@ -313,23 +314,71 @@ else:
     if selected_rows:
         r = selected_rows[0]
         try:
-            lat_val = float(r["Lat"]); lon_val = float(r["Lon"])
+            lat_val = float(r["Lat"])
+            lon_val = float(r["Lon"])
+            flux_val = float(r.get("CH4 Rate") or 0)
             country_val = str(r.get("Country") or "").strip()
             st.session_state["current_country"] = country_val
+            st.session_state["selected_lat"] = lat_val
+            st.session_state["selected_lon"] = lon_val
+            st.session_state["selected_flux"] = flux_val
 
             df, cands_json, logs = run_facility_finder(
-                lat=lat_val, lon=lon_val,
-                bearing=bearing_default, radius_km=radius_default,
-                leak_type=leak_default, engine_choice=engine_default,
+                lat=lat_val,
+                lon=lon_val,
+                bearing=bearing_default,
+                radius_km=radius_default,
+                leak_type=leak_default,
+                engine_choice=engine_default,
                 country_hint=country_val,
             )
             st.session_state["cands_table"] = df
             st.session_state["cands_json"] = cands_json
             st.session_state["finder_logs"] = logs
             st.session_state["selected_cand_idx"] = -1
-            st.success(f"Facility Finder run for Lat {lat_val:.5f}, Lon {lon_val:.5f} (Country: {country_val or 'N/A'})")
+            st.success(
+                f"Facility Finder run for Lat {lat_val:.5f}, Lon {lon_val:.5f} (Country: {country_val or 'N/A'})"
+            )
         except Exception as e:
             st.warning(f"Could not run finder for selected row: {e}")
+
+    if "selected_lat" in st.session_state and "selected_lon" in st.session_state:
+        st.subheader("Plume Map")
+        flux = st.session_state.get("selected_flux", 0.0)
+        token = os.getenv("MAPBOX_ACCESS_TOKEN")
+        if token:
+            map_df = pd.DataFrame([
+                {
+                    "lat": st.session_state["selected_lat"],
+                    "lon": st.session_state["selected_lon"],
+                    "flux": flux,
+                    "radius": max(flux, 0) * 100,
+                }
+            ])
+            layer = pdk.Layer(
+                "ScatterplotLayer",
+                data=map_df,
+                get_position="[lon, lat]",
+                get_radius="radius",
+                get_fill_color="[255, 0, 0, 160]",
+                pickable=True,
+            )
+            view_state = pdk.ViewState(
+                latitude=st.session_state["selected_lat"],
+                longitude=st.session_state["selected_lon"],
+                zoom=8,
+            )
+            st.pydeck_chart(
+                pdk.Deck(
+                    map_style="mapbox://styles/mapbox/satellite-streets-v12",
+                    initial_view_state=view_state,
+                    layers=[layer],
+                    tooltip={"text": "CH4 Rate: {flux}"},
+                    api_keys={"mapbox": token},
+                )
+            )
+        else:
+            st.warning("MAPBOX_ACCESS_TOKEN not set. Map cannot be displayed.")
 
 # Fallback by ID
 if st.button("Run Facility Finder for ID"):
