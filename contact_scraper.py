@@ -171,6 +171,47 @@ def _google_cse_first_result(query: str, logs: Optional[List[str]], timeout: int
         _log(logs, f"[Google CSE] error: {e}")
     return None
 
+def _duckduckgo_first_result(query: str, logs: Optional[List[str]], timeout: int = 10) -> Optional[str]:
+    """Simple DuckDuckGo search using the public HTML endpoint."""
+    try:
+        _log(logs, f"[DuckDuckGo] query={query}")
+        r = SESSION.get(
+            "https://duckduckgo.com/html/",
+            params={"q": query},
+            timeout=timeout,
+        )
+        if r.status_code != 200:
+            _log(logs, f"[DuckDuckGo] non-200: {r.status_code}")
+            return None
+        soup = BeautifulSoup(r.text, "html.parser")
+        for a in soup.select("a.result__a"):
+            href = a.get("href")
+            if href and not _is_social(href):
+                return href
+    except Exception as e:
+        _log(logs, f"[DuckDuckGo] error: {e}")
+    return None
+
+def _search_first_result(query: str, logs: Optional[List[str]], provider: str = "auto", timeout: int = 10) -> Optional[str]:
+    """Return first result from configured provider (Google or DuckDuckGo)."""
+    provider = (provider or "auto").lower()
+    # Determine search order
+    searchers: List[Tuple[str, Callable[..., Optional[str]]]] = []
+    if provider in ("google", "auto"):
+        searchers.append(("google", lambda q: _google_cse_first_result(q, logs, timeout)))
+    if provider in ("duckduckgo", "auto"):
+        searchers.append(("duckduckgo", lambda q: _duckduckgo_first_result(q, logs, timeout)))
+
+    for name, func in searchers:
+        url = func(query)
+        if url:
+            if name == "google":
+                _log(logs, f"Resolved via Google CSE: {url}")
+            else:
+                _log(logs, f"Resolved via DuckDuckGo: {url}")
+            return url
+    return None
+
 # =============================================================================
 # Website resolution (simple & deterministic)
 # =============================================================================
@@ -180,12 +221,14 @@ def resolve_website(
     lat: Optional[float],
     lon: Optional[float],
     given_website: str,
-    logs: Optional[List[str]]
+    logs: Optional[List[str]],
+    search_provider: str = "auto",
 ) -> str:
     """
     1) Use given website if present.
     2) Try manual overrides (site_overrides.json or env path).
-    3) Try Google CSE (if configured): "<name> <country>" then "<name>".
+    3) Try search provider (Google CSE if configured, otherwise DuckDuckGo):
+       "<name> <country>" then "<name>".
     4) Otherwise: return "" and let the UI show 'add mapping'.
     """
     site = (given_website or "").strip()
@@ -200,9 +243,8 @@ def resolve_website(
         return _ensure_scheme(matched)
 
     q1 = f"{name} {country}".strip()
-    site = _google_cse_first_result(q1, logs) or _google_cse_first_result(name, logs)
+    site = _search_first_result(q1, logs, provider=search_provider) or _search_first_result(name, logs, provider=search_provider)
     if site:
-        _log(logs, f"Resolved via Google CSE: {site}")
         return _ensure_scheme(site)
 
     _log(logs, "No website resolved (consider adding to site_overrides.json).")
@@ -273,7 +315,7 @@ def scrape_contacts_for_candidate(
     retries: int = 1,
     logs: Optional[List[str]] = None,
     enrich_missing_website: bool = True,
-    search_provider: str = "auto",  # ignored in simplified POC
+    search_provider: str = "auto",
 ) -> Dict[str, Any]:
     name = cand.get("name") or "(unnamed)"
     country = cand.get("country") or ""
@@ -283,7 +325,7 @@ def scrape_contacts_for_candidate(
 
     _log(logs, f"=== Candidate: {name}")
 
-    site = resolve_website(name, country, lat, lon, given_site, logs) if enrich_missing_website else (given_site or "")
+    site = resolve_website(name, country, lat, lon, given_site, logs, search_provider=search_provider) if enrich_missing_website else (given_site or "")
     site = _ensure_scheme(site)
 
     row = {
