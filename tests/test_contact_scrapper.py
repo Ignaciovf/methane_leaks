@@ -64,29 +64,6 @@ def test_resolve_website_uses_overrides(tmp_path, monkeypatch):
     assert site == "https://operator.example"
 
 
-def test_resolve_website_uses_open_search(monkeypatch):
-    # Ensure google keys absent so duckduckgo fallback is used
-    monkeypatch.setenv("GOOGLE_API_KEY", "")
-    monkeypatch.setenv("GOOGLE_CX", "")
-
-    def fake_ddg(query, logs, timeout=10):
-        return "https://operator.example"
-
-    monkeypatch.setattr(cs, "_duckduckgo_first_result", fake_ddg)
-
-    logs = []
-    site = cs.resolve_website(
-        name="Five Sisters compressor station",
-        country="USA",
-        lat=None,
-        lon=None,
-        given_website="",
-        logs=logs,
-        search_provider="duckduckgo",
-    )
-    assert site == "https://operator.example"
-
-
 def test_resolve_website_uses_openai(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test")
 
@@ -103,7 +80,6 @@ def test_resolve_website_uses_openai(monkeypatch):
         lon=None,
         given_website="",
         logs=logs,
-        search_provider="openai",
     )
     assert site == "https://operator.example"
 

@@ -53,11 +53,6 @@ HIGH_VALUE_PATHS = [
     "/privacy", "/privacy-policy", "/terms", "/terms-of-use", "/legal",
     "/impressum", "/imprint", "/empresa", "/contacto", "/quienes-somos", "/kontakt",
 ]
-
-# Optional Google CSE
-GOOGLE_KEY = os.getenv("GOOGLE_API_KEY", "").strip()
-GOOGLE_CX  = os.getenv("GOOGLE_CX", "").strip()
-
 OPENAI_SEARCH_MODEL = os.getenv("OPENAI_SEARCH_MODEL", "gpt-4o-mini").strip()
 
 # NOTE: Do NOT read SCRAPER_SITE_OVERRIDES here (import time). We read it dynamically in _load_overrides().
@@ -109,7 +104,7 @@ def _best_email(emails: List[str], domain: str) -> str:
     return emails[0]
 
 # =============================================================================
-# Overrides & a single optional search provider
+# Overrides & OpenAI web search
 # =============================================================================
 def _load_overrides(logs: Optional[List[str]]) -> Dict[str, str]:
     """
@@ -171,78 +166,13 @@ def _openai_web_search_first_result(query: str, logs: Optional[List[str]], timeo
         _log(logs, f"[OpenAI] error: {e}")
     return None
 
-def _google_cse_first_result(query: str, logs: Optional[List[str]], timeout: int = 10) -> Optional[str]:
-    if not (GOOGLE_KEY and GOOGLE_CX):
-        if GOOGLE_KEY and not GOOGLE_CX:
-            _log(logs, "Google API key present but GOOGLE_CX missing — skipping Google CSE.")
-        elif GOOGLE_CX and not GOOGLE_KEY:
-            _log(logs, "GOOGLE_CX present but GOOGLE_API_KEY missing — skipping Google CSE.")
-        else:
-            _log(logs, "Google CSE keys not configured — skipping search.")
-        return None
-    try:
-        _log(logs, f"[Google CSE] query={query}")
-        r = SESSION.get(
-            "https://www.googleapis.com/customsearch/v1",
-            params={"key": GOOGLE_KEY, "cx": GOOGLE_CX, "q": query, "num": 5},
-            timeout=timeout
-        )
-        if r.status_code != 200:
-            _log(logs, f"[Google CSE] non-200: {r.status_code}")
-            return None
-        items = (r.json().get("items") or [])
-        for it in items:
-            url = it.get("link")
-            if url and not _is_social(url):
-                return url
-    except Exception as e:
-        _log(logs, f"[Google CSE] error: {e}")
-    return None
 
-def _duckduckgo_first_result(query: str, logs: Optional[List[str]], timeout: int = 10) -> Optional[str]:
-    """Simple DuckDuckGo search using the public HTML endpoint."""
-    try:
-        _log(logs, f"[DuckDuckGo] query={query}")
-        r = SESSION.get(
-            "https://duckduckgo.com/html/",
-            params={"q": query},
-            timeout=timeout,
-        )
-        if r.status_code != 200:
-            _log(logs, f"[DuckDuckGo] non-200: {r.status_code}")
-            return None
-        soup = BeautifulSoup(r.text, "html.parser")
-        for a in soup.select("a.result__a"):
-            href = a.get("href")
-            if href and not _is_social(href):
-                return href
-    except Exception as e:
-        _log(logs, f"[DuckDuckGo] error: {e}")
-    return None
-
-def _search_first_result(query: str, logs: Optional[List[str]], provider: str = "auto", timeout: int = 10) -> Optional[str]:
-    """Return first result from configured provider (OpenAI, Google or DuckDuckGo)."""
-    provider = (provider or "auto").lower()
-    # Determine search order
-    searchers: List[Tuple[str, Callable[..., Optional[str]]]] = []
-    if provider in ("openai", "auto"):
-        searchers.append(("openai", lambda q: _openai_web_search_first_result(q, logs, timeout)))
-    if provider in ("google", "auto"):
-        searchers.append(("google", lambda q: _google_cse_first_result(q, logs, timeout)))
-    if provider in ("duckduckgo", "auto"):
-        searchers.append(("duckduckgo", lambda q: _duckduckgo_first_result(q, logs, timeout)))
-
-    for name, func in searchers:
-        url = func(query)
-        if url:
-            if name == "google":
-                _log(logs, f"Resolved via Google CSE: {url}")
-            elif name == "openai":
-                _log(logs, f"Resolved via OpenAI web search: {url}")
-            else:
-                _log(logs, f"Resolved via DuckDuckGo: {url}")
-            return url
-    return None
+def _search_first_result(query: str, logs: Optional[List[str]], timeout: int = 10) -> Optional[str]:
+    """Return the first result using OpenAI web search."""
+    url = _openai_web_search_first_result(query, logs, timeout)
+    if url:
+        _log(logs, f"Resolved via OpenAI web search: {url}")
+    return url
 
 # =============================================================================
 # Website resolution (simple & deterministic)
@@ -254,13 +184,11 @@ def resolve_website(
     lon: Optional[float],
     given_website: str,
     logs: Optional[List[str]],
-    search_provider: str = "auto",
 ) -> str:
     """
     1) Use given website if present.
     2) Try manual overrides (site_overrides.json or env path).
-    3) Try search provider (OpenAI web search, Google CSE or DuckDuckGo):
-       "<name> <country>" then "<name>".
+    3) Use OpenAI web search: "<name> <country>" then "<name>".
     4) Otherwise: return "" and let the UI show 'add mapping'.
     """
     site = (given_website or "").strip()
@@ -275,7 +203,7 @@ def resolve_website(
         return _ensure_scheme(matched)
 
     q1 = f"{name} {country}".strip()
-    site = _search_first_result(q1, logs, provider=search_provider) or _search_first_result(name, logs, provider=search_provider)
+    site = _search_first_result(q1, logs) or _search_first_result(name, logs)
     if site:
         return _ensure_scheme(site)
 
@@ -347,7 +275,6 @@ def scrape_contacts_for_candidate(
     retries: int = 1,
     logs: Optional[List[str]] = None,
     enrich_missing_website: bool = True,
-    search_provider: str = "auto",
 ) -> Dict[str, Any]:
     name = cand.get("name") or "(unnamed)"
     country = cand.get("country") or ""
@@ -357,7 +284,7 @@ def scrape_contacts_for_candidate(
 
     _log(logs, f"=== Candidate: {name}")
 
-    site = resolve_website(name, country, lat, lon, given_site, logs, search_provider=search_provider) if enrich_missing_website else (given_site or "")
+    site = resolve_website(name, country, lat, lon, given_site, logs) if enrich_missing_website else (given_site or "")
     site = _ensure_scheme(site)
 
     row = {
@@ -399,7 +326,6 @@ def scrape_contacts_bulk(
     max_pages: int = 8,
     retries: int = 1,
     enrich_missing_website: bool = True,
-    search_provider: str = "auto",  # kept for compatibility; not used
     progress_cb: Optional[Callable[[float], None]] = None,
     log_cb: Optional[Callable[[str], None]] = None,
 ) -> Tuple[pd.DataFrame, List[str]]:
@@ -427,9 +353,12 @@ def scrape_contacts_bulk(
             if log_cb: log_cb("\n".join(logs[-80:]))
 
             row = scrape_contacts_for_candidate(
-                c, timeout=timeout, max_pages=max_pages, retries=retries,
-                logs=logs, enrich_missing_website=enrich_missing_website,
-                search_provider=search_provider
+                c,
+                timeout=timeout,
+                max_pages=max_pages,
+                retries=retries,
+                logs=logs,
+                enrich_missing_website=enrich_missing_website,
             )
             rows.append(row)
         except Exception as e:
