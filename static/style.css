@@ -58,6 +58,15 @@ h2 {
     transition: background 0.3s ease;
 }
 
+/* Logo in hero header */
+.hero .logo {
+  display: block;
+  max-width: min(100%, 1200px); /* increased max width */
+  width: 100%; /* use full width up to max-width */
+  height: auto;
+  margin: 0 auto 0.5rem;
+}
+
 .button:hover {
     background: #005fa3;
 }
