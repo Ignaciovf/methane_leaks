@@ -29,7 +29,13 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "methane_password")
 
 CSV_FALLBACK = "/mnt/data/unep_methanedata_detected_plumes.csv"
 
-st.set_page_config(page_title="Methane Leaks", layout="wide")
+ACCENT_COLOR = "#87C062"
+st.set_page_config(
+    page_title="Methane Leaks",
+    layout="wide",
+    page_icon="static/images/methane_leaks_without_background_with_text.png",
+    theme={"primaryColor": ACCENT_COLOR},
+)
 
 
 def get_connection():
@@ -242,7 +248,37 @@ contact@methaneleaks.org
 # =========================
 # UI
 # =========================
-st.title("🛰️ Methane Leaks")
+st.markdown(
+    f"""
+    <style>
+        #MainMenu {{visibility: hidden;}}
+        footer {{visibility: hidden;}}
+        header {{visibility: hidden;}}
+        :root {{
+            --primary-color: {ACCENT_COLOR};
+        }}
+        .stButton>button {{
+            background-color: {ACCENT_COLOR};
+            color: white;
+            border: none;
+        }}
+        .stButton>button:hover {{
+            background-color: #76a153;
+            color: white;
+        }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+col1, col2, col3 = st.columns([1, 2, 1])
+with col2:
+    st.image("static/images/methane_leaks_without_background_with_text.png", use_column_width=True)
+
+st.markdown(
+    f"<h1 style='text-align: center; color: {ACCENT_COLOR};'>Methane Leaks</h1>",
+    unsafe_allow_html=True,
+)
 
 # Sidebar
 st.sidebar.header("Facility Finder defaults")
