@@ -56,6 +56,7 @@ class MapboxFacilityFinder:
             mapbox_token: Optional[str] = None,
             openai_client: Optional[Any] = None,
             openai_model: str = "text-embedding-3-small",
+            openai_label_model: str = "gpt-4o-mini",
             user_agent: str = "methane-leak-notifier/1.0 (facility-finder)",
             verbose: bool = False,
     ):
@@ -71,7 +72,9 @@ class MapboxFacilityFinder:
                 raise RuntimeError("openai package not installed, but OPENAI_API_KEY is set.")
             self.client = OpenAI()
         self.embedding_model = openai_model
+        self.label_model = openai_label_model
         self._emb_cache: Dict[str, List[float]] = {}
+        self._sec_cache: Dict[Tuple[float, float, float, Optional[str]], Tuple[float, List[FacilityCandidate]]] = {}
         self.verbose = verbose
 
     # -------- logging helper --------
@@ -120,6 +123,14 @@ class MapboxFacilityFinder:
                 self._log(debug, f"tilequery kept {len(c)} features")
                 cands += c
 
+        # secondary source
+        sec = self._secondary_pois(lat, lon, radius_km, hint=leak_type_hint, debug=debug)
+        self._log(debug, f"secondary source returned {len(sec)} features")
+        cands += sec
+
+        # Deduplicate before scoring
+        cands = self._dedupe_candidates(cands, threshold_km=0.2, debug=debug)
+
         # Score & rank
         for c in cands:
             c.distance_km = self._haversine_km(lat, lon, c.lat, c.lon)
@@ -133,13 +144,7 @@ class MapboxFacilityFinder:
                     (c.text_score or 0) * 0.15
             )
 
-        # Dedup by (name,rounded coords)
-        out: Dict[Tuple[str, float, float], FacilityCandidate] = {}
-        for c in sorted(cands, key=lambda x: (x.score or 0), reverse=True):
-            key = ((c.name or "").lower(), round(c.lat or 0.0, 5), round(c.lon or 0.0, 5))
-            if key not in out:
-                out[key] = c
-        final = list(out.values())[: max(1, min(int(limit or 15), 50))]
+        final = sorted(cands, key=lambda x: (x.score or 0), reverse=True)[: max(1, min(int(limit or 15), 50))]
         self._log(debug, f"final candidates after scoring & dedupe: {len(final)}")
         return final
 
@@ -244,6 +249,118 @@ class MapboxFacilityFinder:
                 raw=feat
             ))
         return kept
+
+    # -------- secondary POI source (OSM Overpass) --------
+    def _secondary_pois(self, lat: float, lon: float, radius_km: float, hint: Optional[str] = None,
+                        debug: Optional[List[str]] = None) -> List[FacilityCandidate]:
+        key = (round(lat, 3), round(lon, 3), round(radius_km, 1), hint)
+        now = time.time()
+        ttl = 3600.0
+        if key in self._sec_cache:
+            ts, val = self._sec_cache[key]
+            if now - ts < ttl:
+                return val
+
+        cands = self._osm_pois(lat, lon, radius_km, hint=hint, debug=debug)
+        self._sec_cache[key] = (now, cands)
+        return cands
+
+    def _osm_pois(self, lat: float, lon: float, radius_km: float, hint: Optional[str] = None,
+                  debug: Optional[List[str]] = None) -> List[FacilityCandidate]:
+        radius_m = int(radius_km * 1000)
+        query = f"""
+        [out:json][timeout:25];
+        (
+          node(around:{radius_m},{lat},{lon})[name];
+          way(around:{radius_m},{lat},{lon})[name];
+          relation(around:{radius_m},{lat},{lon})[name];
+        );
+        out center tags;
+        """
+        url = "https://overpass-api.de/api/interpreter"
+        self._log(debug, "POST Overpass")
+        r = self.SESSION.post(url, data={"data": query}, timeout=60)
+        self._log(debug, f"status {r.status_code}")
+        if r.status_code >= 400:
+            return []
+        try:
+            js = r.json()
+        except Exception:
+            return []
+        out: List[FacilityCandidate] = []
+        for el in js.get("elements", []) or []:
+            tags = el.get("tags", {}) or {}
+            lat2 = el.get("lat") or el.get("center", {}).get("lat")
+            lon2 = el.get("lon") or el.get("center", {}).get("lon")
+            name = tags.get("name")
+            cat = tags.get("amenity") or tags.get("industrial") or tags.get("man_made") or tags.get("landuse")
+            props = {"class": cat, "type": tags.get("amenity"), "maki": tags.get("man_made")}
+            if not self._poi_relevant(props, name, hint):
+                continue
+            out.append(FacilityCandidate(
+                source="osm",
+                lat=lat2, lon=lon2,
+                name=name,
+                category_id=cat,
+                category_name=cat,
+                raw=el
+            ))
+        return out
+
+    # -------- candidate merge/dedupe --------
+    def _name_strength(self, name: Optional[str]) -> int:
+        if not name:
+            return 0
+        nm = name.strip().lower()
+        if nm in {"", "(unnamed)", "unknown"}:
+            return 0
+        return len(nm)
+
+    def _choose_best_candidate(self, a: FacilityCandidate, b: FacilityCandidate) -> FacilityCandidate:
+        sa, sb = self._name_strength(a.name), self._name_strength(b.name)
+        if sa > sb:
+            return a
+        if sb > sa:
+            return b
+        if sa == 0:  # both weak
+            return a
+        if not self.client:
+            return a
+        prompt = (
+            "Two facility records represent the same location. "
+            "Return '1' or '2' for the better facility name for display.\n"
+            f"1: name={a.name!r}, category={a.category_name or a.category_id!r}, website={a.website!r}\n"
+            f"2: name={b.name!r}, category={b.category_name or b.category_id!r}, website={b.website!r}"
+        )
+        try:
+            resp = self.client.chat.completions.create(
+                model=self.label_model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=1,
+            )
+            choice = resp.choices[0].message.content.strip()
+            return b if "2" in choice else a
+        except Exception:
+            return a
+
+    def _dedupe_candidates(self, cands: List[FacilityCandidate], threshold_km: float = 0.2,
+                           debug: Optional[List[str]] = None) -> List[FacilityCandidate]:
+        merged: List[FacilityCandidate] = []
+        for c in cands:
+            dup = None
+            for m in merged:
+                if self._haversine_km(c.lat, c.lon, m.lat, m.lon) <= threshold_km:
+                    dup = m
+                    break
+            if dup is None:
+                merged.append(c)
+                continue
+            better = self._choose_best_candidate(dup, c)
+            if better is not dup:
+                idx = merged.index(dup)
+                merged[idx] = better
+        self._log(debug, f"dedupe reduced to {len(merged)} candidates")
+        return merged
 
     # -------- relevance filter --------
     def _poi_relevant(self, props: Dict[str, Any], name: Optional[str], hint: Optional[str]) -> bool:
