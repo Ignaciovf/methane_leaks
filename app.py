@@ -29,7 +29,13 @@ DB_PASSWORD = os.getenv("DB_PASSWORD", "methane_password")
 
 CSV_FALLBACK = "/mnt/data/unep_methanedata_detected_plumes.csv"
 
-st.set_page_config(page_title="Methane Leaks", layout="wide")
+ACCENT_COLOR = "#87C062"
+st.set_page_config(
+    page_title="Methane Leaks",
+    layout="wide",
+    page_icon="static/images/methane_leaks_without_background_with_text.png"
+)
+
 
 
 def get_connection():
@@ -242,7 +248,33 @@ contact@methaneleaks.org
 # =========================
 # UI
 # =========================
-st.title("🛰️ Methane Leaks")
+st.markdown(
+    f"""
+    <style>
+        #MainMenu {{visibility: hidden;}}
+        footer {{visibility: hidden;}}
+        header {{visibility: hidden;}}
+        :root {{
+            --primary-color: {ACCENT_COLOR};
+        }}
+        .stButton>button {{
+            background-color: {ACCENT_COLOR};
+            color: white;
+            border: none;
+        }}
+        .stButton>button:hover {{
+            background-color: #76a153;
+            color: white;
+        }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+col1, col2, col3 = st.columns([1, 2, 1])
+with col2:
+    st.image("static/images/methane_leaks_without_background_with_text.png", use_column_width=True)
+
 
 # Sidebar
 st.sidebar.header("Facility Finder defaults")
@@ -289,15 +321,28 @@ except Exception as e:
     st.stop()
 
 # DASHBOARD (full-width)
-st.subheader("Dashboard")
+st.subheader("Active Methane Plume")
 if table_df.empty:
     st.info("No rows.")
 else:
+    # Rename the column
+    if "Contacted" in table_df.columns:
+        table_df = table_df.rename(columns={"Contacted": "Contacted by Methane Leaks"})
+
+    total_count = len(table_df)
+
+    # Page size selector (default 30)
+    page_size = st.selectbox("Rows per page", [30, 50, 100, 200], index=0)
+
+    # Summary line
+    st.caption(f"Showing up to {page_size} per page • {total_count} active plumes total")
+
+    # Configure grid with pagination
     gob = GridOptionsBuilder.from_dataframe(table_df)
     gob.configure_selection(selection_mode="single", use_checkbox=False)
-    gob.configure_pagination(paginationAutoPageSize=False, paginationPageSize=30)
-    gob.configure_grid_options(domLayout="normal")
-    gob.configure_default_column(resizable=True, wrapText=True, autoHeight=True)
+    gob.configure_pagination(paginationAutoPageSize=False, paginationPageSize=page_size)
+    # Ensure the pagination toolbar is visible under the rows
+    gob.configure_grid_options(domLayout="autoHeight")
     grid_options = gob.build()
 
     grid_return = AgGrid(
@@ -305,8 +350,9 @@ else:
         gridOptions=grid_options,
         update_mode=GridUpdateMode.SELECTION_CHANGED,
         allow_unsafe_jscode=True,
-        height=620,
-        fit_columns_on_grid_load=True
+        fit_columns_on_grid_load=True,
+        # Remove fixed height so autoHeight can reveal the pagination bar
+        # height argument intentionally omitted
     )
 
     selected_rows = grid_return.get("selected_rows", [])
