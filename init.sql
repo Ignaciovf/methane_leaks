@@ -7,3 +7,4 @@ CREATE TABLE IF NOT EXISTS methane_leaks (
     ch4_fluxrate DOUBLE PRECISION,
     contacted_by_methane_leaks BOOLEAN DEFAULT FALSE
 );
+
