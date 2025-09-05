@@ -15,5 +15,14 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
 
+  app:
+    build: .
+    ports:
+      - "8508:80"
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+
 volumes:
   postgres_data:
