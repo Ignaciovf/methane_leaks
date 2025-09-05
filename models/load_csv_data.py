@@ -3,15 +3,20 @@ import psycopg2
 from psycopg2.extras import execute_values
 import os
 
+DB_HOST = os.getenv("DB_HOST", "postgres")
+DB_PORT = int(os.getenv("DB_PORT", "5432"))
+DB_NAME = os.getenv("DB_NAME", "methane_leaks_db")
+DB_USER = os.getenv("DB_USER", "methane_user")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "methane_password")
 
-# Database connection
+
 def get_connection():
     return psycopg2.connect(
-        host="localhost",
-        port="5433",
-        database="methane_leaks_db",
-        user="methane_user",
-        password="methane_password"
+        host=DB_HOST,
+        port=DB_PORT,
+        database=DB_NAME,
+        user=DB_USER,
+        password=DB_PASSWORD,
     )
 
 
@@ -178,3 +183,4 @@ def load_csv_data():
 
 if __name__ == "__main__":
     load_csv_data()
+
