@@ -1,0 +1,2 @@
+-- Initialization script for PostgreSQL
+-- Add SQL commands here to seed the database.

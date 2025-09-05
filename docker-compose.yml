@@ -4,6 +4,7 @@ version: '3.8'
 services:
   postgres:
     image: postgis/postgis:15-3.3
+    platform: linux/amd64
     environment:
       POSTGRES_DB: methane_leaks_db
       POSTGRES_USER: methane_user
